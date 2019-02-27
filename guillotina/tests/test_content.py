@@ -1,5 +1,8 @@
 from guillotina import configure
+from guillotina import schema
 from guillotina.behaviors.dublincore import IDublinCore
+from guillotina.behaviors.instance import AnnotationBehavior
+from guillotina.behaviors.properties import ContextProperty
 from guillotina.component import get_utility
 from guillotina.content import create_content
 from guillotina.content import create_content_in_container
@@ -9,14 +12,49 @@ from guillotina.content import load_cached_schema
 from guillotina.exceptions import NoPermissionToAdd
 from guillotina.exceptions import NotAllowedContentType
 from guillotina.interfaces import IApplication
+from guillotina.interfaces import IResource
 from guillotina.interfaces import IItem
 from guillotina.interfaces.types import IConstrainTypes
 from guillotina.schema import Dict
 from guillotina.schema import TextLine
 from guillotina.tests import utils
+from zope.interface import Interface
 
+import json
 import pickle
 import pytest
+
+
+class IComment(Interface):
+
+    msg = schema.TextLine(required=True)
+
+
+class IComments(Interface):
+
+    comments = schema.List(value_type=schema.Object(schema=IComment), required=False)
+    json_comments = schema.List(value_type=schema.JSONField(), required=False)
+
+
+class ICommentsMarker(Interface):
+    """
+    Marker interface for content with Comments
+    """
+
+
+@configure.behavior(
+    title="Comments",
+    provides=IComments,
+    marker=ICommentsMarker,
+    for_=IResource,
+)
+class CommentsBehavior(AnnotationBehavior):
+
+    # This line fixes the problem
+    # __local__properties__ = ("comments", "json_comments")
+
+    comments = ContextProperty("comments", [])
+    json_comments = ContextProperty("json_comments", [])
 
 
 class ICustomContentType(IItem):
@@ -31,7 +69,8 @@ class ICustomContentType(IItem):
 
 @configure.contenttype(
     type_name="CustomContentType",
-    schema=ICustomContentType
+    schema=ICustomContentType,
+    behaviors=[IComments.__identifier__, IDublinCore.__identifier__],
 )
 class CustomContentType(Item):
     pass
@@ -170,3 +209,39 @@ async def test_getattr_set_default(container_requester):
     # Assert that obj.__getattr__() returns always same instance of default value
     # for empty fields
     assert id(images1) == id(images2)
+
+
+async def test_create_item_with_behavior(container_requester):
+    async with container_requester as requester:
+        _, status = await requester(
+            'POST', '/db/guillotina', data=
+            json.dumps({
+                '@type': 'CustomContentType',
+                'id': 'foobar',
+                'images': {
+                    'a': 'b'
+                },
+                IComments.__identifier__: {
+                    'comments': [{'msg': 'hola'}],
+                    'json_comments': [{'msg': 'adeu Andreu'}]
+                },
+                IDublinCore.__identifier__: {
+                    'creators': ('root',),
+                    'contributors': ('root',),
+                    'publisher': '@masipcat',
+                }
+            })
+        )
+        assert status == 201
+
+        resp, status = await requester('GET', '/db/guillotina/foobar')
+        assert status == 200
+
+        assert resp['images'] == {'a': 'b'}
+        assert resp[IDublinCore.__identifier__]['creators'] == ['root']
+        assert resp[IDublinCore.__identifier__]['contributors'] == ['root']
+        assert resp[IDublinCore.__identifier__]['publisher'] == '@masipcat'
+
+        # Doesn't work
+        assert resp[IComments.__identifier__]['json_comments'] == [{'msg': 'adeu Andreu'}]
+        assert resp[IComments.__identifier__]['comments'] ==  [{'msg': 'hola'}]
